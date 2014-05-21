@@ -110,6 +110,11 @@ bool parseRegister(const string& word, QPUreg& reg)
     // TODO: check that this is in range.  (ACCUM < 6, e.g.)
     reg.num = atoi(word.c_str() + offset);
 
+    if ((reg.file == QPUreg::ACCUM) && (reg.num >= 6)) {
+      fprintf(stderr, "Warning - accumulator out of range\n");
+      return false;
+    }
+
     return true;
 }
 
@@ -339,31 +344,46 @@ uint64_t assembleALU(context& ctx, string word)
 
     uint8_t ws = 0x0;
     // If the add pipe specifies file b for output, ws = 1
-    if (addDest.file == QPUreg::B)
+    if ((addDest.file == QPUreg::B) ||
+        ((addDest.file == QPUreg::ACCUM) && (mulDest.file == QPUreg::A))) {
         ws = 0x1;
-    // if ws == 1, mul pipe must specify file a for output
-    if (ws == 0x1 && mulDest.file != QPUreg::A) {
-        cout << "constraint check failed.  mul pipe must specify register file A when write-swap set" << endl;
+    }
+    // if ws == 1, mul pipe must specify file a or accumulator for output
+    if (ws == 0x1 && (mulDest.file != QPUreg::A) && (mulDest.file != QPUreg::ACCUM)) {
+        cout << "constraint check failed.  mul pipe must specify register file A when write-swap set, but found " << printRegister(mulDest) << endl;
         return -1;
     }
-    // if ws == 0, mul pipe must specify file b for output
-    if (ws == 0x0 && mulDest.file != QPUreg::B) {
-        cout << "constraint check failed.  mul pipe must specify register file B when write-swap clear" << endl;
+    // if ws == 0, mul pipe must specify file b or accumulator for output
+    if (ws == 0x0 && (mulDest.file != QPUreg::B) && (mulDest.file != QPUreg::ACCUM)) {
+        cout << "constraint check failed.  mul pipe must specify register file B when write-swap clear, but found " << printRegister(mulDest) << endl;
         return -1;
     }
 
     // TODO: handle the accumulators and the small immediate
     uint8_t read_a = 0x0;
-    if (addR1.file == QPUreg::A) read_a = addR1.num;
-    else if (addR2.file == QPUreg::A) read_a = addR2.num;
-    else if (mulR1.file == QPUreg::A) read_a = mulR1.num;
-    else if (mulR2.file == QPUreg::A) read_a = mulR2.num;
-
     uint8_t read_b = 0x0;
-    if (addR1.file == QPUreg::B) read_b = addR1.num;
-    else if (addR2.file == QPUreg::B) read_b = addR2.num;
-    else if (mulR1.file == QPUreg::B) read_b = mulR1.num;
-    else if (mulR2.file == QPUreg::B) read_b = mulR2.num;
+    bool isReadASet = false;
+    bool isReadBSet = false;
+    QPUreg candidates[] = {addR1, addR2, mulR1, mulR2};
+    for (int index = 0; index < (sizeof(candidates)/sizeof(candidates[0])); index += 1) {
+      QPUreg reg = candidates[index];
+      if (reg.file == QPUreg::A) {
+        if (isReadASet && (read_a != reg.num)) {
+          fprintf(stderr, "Error: Can't set multiple different general registers as sources in a single ALU instruction\n");
+          return -1;
+        }
+        isReadASet = true;
+        read_a = reg.num;
+      }
+      if (reg.file == QPUreg::B) {
+        if (isReadBSet && (read_b != reg.num)) {
+          fprintf(stderr, "Error: Can't set multiple different general registers as sources in a single ALU instruction\n");
+          return -1;
+        }
+        isReadBSet = true;
+        read_b = reg.num;
+      }
+    }
 
     // checks:
     //   read_a not set and one of the muxes specifies file A ...
@@ -372,8 +392,32 @@ uint64_t assembleALU(context& ctx, string word)
 
     // we could have immediates in the first register slot but not sure it makes sense
     // As above, we should check that read_b is not already set
-    if (addR2.file == QPUreg::SMALL)    { read_b = addR2.num; sig = 13; }
-    if (mulR2.file == QPUreg::SMALL)    { read_b = mulR2.num; sig = 13; }
+    if (addR2.file == QPUreg::SMALL)    {
+      if (isReadBSet && (read_b != addR2.num)) {
+        fprintf(stderr, "Error: Can't set an immediate and general registers as sources in a single ALU instruction\n");
+        return -1;
+      }
+      isReadBSet = true;
+      read_b = addR2.num;
+      sig = 13;
+    }
+    if (mulR2.file == QPUreg::SMALL)    {
+      if (isReadBSet && (read_b != mulR2.num)) {
+        fprintf(stderr, "Error: Can't set an immediate and general registers as sources in a single ALU instruction\n");
+        return -1;
+      }
+      isReadBSet = true;
+      read_b = mulR2.num;
+      sig = 13;
+    }
+
+    // The accumulators are mapped to r32-35 when writing to them as destinations
+    if (addDest.file == QPUreg::ACCUM) {
+      addDest.num += 32;
+    }
+    if (mulDest.file == QPUreg::ACCUM) {
+      mulDest.num += 32;
+    }
 
     uint8_t add_a = setALUMux(addR1) & 0x7;
     uint8_t add_b = setALUMux(addR2) & 0x7;

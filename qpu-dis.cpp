@@ -9,7 +9,7 @@ void show_qpu_fragment(uint32_t *inst, int length);
 
 
 int base;
-int showfields = 0;
+int showfields = 1;
 
 const char *acc_names[] = {
 	"r0", "r1", "r2", "r3", "r4", "r5"
@@ -225,7 +225,7 @@ void show_qpu_add_mul(uint32_t i0, uint32_t i1)
 	uint32_t wb    = (i1 >> 0) & 0x3f;
 
 	if (showfields) {
-		printf("mulop=%d, addop=%d, ra=%d, rb=%d, adda=%d, addb=%d, mula=%d, mulb=%d, op=%d, unpacking=%d, packmul=%d, packing=%d, addcc=%d, mulcc=%d, F=%d, X=%d, wa=%d, wb=%d  ",
+		printf("mulop=%d, addop=%d, ra=%d, rb=%d, adda=%d, addb=%d, mula=%d, mulb=%d, op=%d, unpacking=%d, packmul=%d, packing=%d, addcc=%d, mulcc=%d, F=%d, X=%d, wa=%d, wb=%d  \n",
 			mulop, addop, ra, rb, adda, addb, mula, mulb, op, unpacking, packmul, packing, addcc, mulcc, F, X, wa, wb);
 	}
 
