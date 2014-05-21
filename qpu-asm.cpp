@@ -501,12 +501,20 @@ uint64_t assembleLDI(context& ctx, string word)
     while (nextToken(ctx.stream, token_str, &ctx.stream) != END)
         ;
 
+    // The accumulators are mapped to r32-35 in this context
+    if (register1.file == QPUreg::ACCUM) {
+      register1.num += 32;
+    }
+    if (register2.file == QPUreg::ACCUM) {
+      register2.num += 32;
+    }
+
     uint32_t high = (uint32_t)0xE00 << 20;
     high |= (uint32_t)0x1 << 17;      // cond_add
     high |= (uint32_t)0x1 << 14;      // cond_mul
     high |= (uint32_t)0x0 << 13;      // sf
     high |= (uint32_t)0x0 << 12;      // ws
-    uint8_t addreg = (register1.file == QPUreg::A) ? register1.num : register2.num;
+    uint8_t addreg = (register1.file != QPUreg::B) ? register1.num : register2.num;
     uint8_t mulreg = (register1.file == QPUreg::B) ? register1.num : register2.num;
     high |= (uint32_t)addreg << 6;
     high |= mulreg;
