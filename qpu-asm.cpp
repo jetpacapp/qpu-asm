@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 #include <assert.h>
+#include <errno.h>
 
 using namespace std;
 
@@ -107,6 +108,16 @@ bool parseRegister(const string& word, QPUreg& reg)
             reg.file = QPUreg::ACCUM;
             offset = 1;
     }
+
+    const char* possibleNumber = (word.c_str() + offset);
+
+    char *endOfNumber;
+    reg.num = strtol(possibleNumber, &endOfNumber, 10);
+    if (endOfNumber == possibleNumber || *endOfNumber != '\0' || errno == ERANGE) {
+      cerr << "Warning - couldn't interpret '" << word << "' as a register" << endl;
+      return false;
+    }
+
     // TODO: check that this is in range.  (ACCUM < 6, e.g.)
     reg.num = atoi(word.c_str() + offset);
 
@@ -118,19 +129,41 @@ bool parseRegister(const string& word, QPUreg& reg)
     return true;
 }
 
-uint32_t parseImmediate(const string& str)
+uint32_t parseFullImmediate(const string& str)
 {
+    uint32_t result;
     // if there is an 'x' we assume it's hex.
-    if (str.find_first_of("x") != string::npos)
-        return strtoul(str.c_str(), NULL, 16);
-
-    if (str.find_first_of(".f") != string::npos) {
+    if (str.find_first_of("x") != string::npos) {
+        result = strtoul(str.c_str(), NULL, 16);
+    } else if (str.find_first_of(".f") != string::npos) {
         float f = strtof(str.c_str(), NULL);
-        return *(uint32_t*)&f;
+        result = *(uint32_t*)&f;
+    } else {
+        result = strtoul(str.c_str(), NULL, 10);
     }
+    return result;
+}
 
-    // otherwise decimal
-    return strtoul(str.c_str(), NULL, 10);
+int32_t parseSmallImmediate(const string& str)
+{
+    int32_t result;
+    if (str.find_first_of("x") != string::npos) {
+        result = strtoul(str.c_str(), NULL, 16);
+        if (result >= 16) {
+          cerr << "Immediate out of range: " << str << endl;
+          result = -1;
+        }
+    } else if (str.find_first_of("<<") != string::npos) {
+        uint32_t shift = strtoul(str.c_str() + 2, NULL, 10);
+        result = (48 + shift);
+    } else {
+        result = strtoul(str.c_str(), NULL, 10);
+        if (result >= 16) {
+          cerr << "Immediate out of range: " << str << endl;
+          result = -1;
+        }
+    }
+    return result;
 }
 
 uint8_t parseBranchCond(const string& str)
@@ -255,25 +288,26 @@ bool aluHelper(const char *stream, QPUreg& dest, QPUreg& r1, QPUreg& r2, uint8_t
         return false;
     }
 
-    parseRegister(token_str, dest);
+    if (!parseRegister(token_str, dest)) {
+      return false;
+    }
     tok = nextToken(stream, token_str, &stream);
     if (tok != COMMA) return false;
     tok = nextToken(stream, token_str, &stream);
-    parseRegister(token_str, r1);
+    if (!parseRegister(token_str, r1)) {
+      return false;
+    }
 
     tok = nextToken(stream, token_str, &stream);
     if (tok != COMMA) return false;
     tok = nextToken(stream, token_str, &stream);
     if (!parseRegister(token_str, r2)) {
         r2.file = QPUreg::SMALL;
-        uint32_t imm = parseImmediate(token_str);
-        // double check handle negative values
-        if (imm < 16)
-            r2.num = imm;
-        else {
-            cerr << "TODO: Unhandled small immediate" << endl;
-            return false;
+        int32_t imm = parseSmallImmediate(token_str);
+        if (imm < 0) {
+          return false;
         }
+        r2.num = imm;
     }
 
     /*
@@ -292,7 +326,7 @@ uint64_t assembleALU(context& ctx, string word)
     string token_str;
     uint8_t add_op = addOpCode(word);
     if (add_op == 0xFF) {
-        cout << "FATAL (assert).  Bad opcode" << endl;
+        cout << "FATAL (assert).  Bad ADD opcode: " << word << endl;
         return -1;
     }
 
@@ -308,7 +342,7 @@ uint64_t assembleALU(context& ctx, string word)
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
     uint8_t mul_op = mulOpCode(token_str);
     if (mul_op == 0xFF) {
-        cout << "FATAL (assert).  Bad opcode" << endl;
+        cout << "FATAL (assert).  Bad MUL opcode: " << token_str << endl;
         return -1;
     }
 
@@ -475,7 +509,9 @@ uint64_t assembleLDI(context& ctx, string word)
 
     QPUreg register1, register2;
     // check errors here
-    parseRegister(token_str, register1);
+    if (!parseRegister(token_str, register1)) {
+      return false;
+    }
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
     if (tok != COMMA) return -1;
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
@@ -486,13 +522,15 @@ uint64_t assembleLDI(context& ctx, string word)
     register2.num = 39;
     register2.file = (register1.file == QPUreg::A) ? QPUreg::B : QPUreg::A;
     if (isRegisterWord(token_str)) {
-        parseRegister(token_str, register2);
+        if (!parseRegister(token_str, register2)) {
+          return false;
+        }
         tok = nextToken(ctx.stream, token_str, &ctx.stream);
         // check that this is a comma ...
     }
 
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
-    unsigned int immediate = parseImmediate(token_str);
+    unsigned int immediate = parseFullImmediate(token_str);
 
     cout << "r1: " << printRegister(register1) << ", r2: "
                    << printRegister(register2) << ", immed: 0x"
@@ -549,7 +587,9 @@ uint64_t assembleBRANCH(context& ctx, string word)
         cerr << "branch expecting destination register." << endl;
         return -1;
     }
-    parseRegister(token_str, dest);
+    if (!parseRegister(token_str, dest)) {
+      return false;
+    }
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
     if (tok != COMMA) return false;
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
@@ -579,7 +619,9 @@ uint64_t assembleBRANCH(context& ctx, string word)
         // chew the comma we just read
         ctx.stream = discard;
         tok = nextToken(ctx.stream, token_str, &ctx.stream);
-        parseRegister(token_str, offsetReg);
+        if (!parseRegister(token_str, offsetReg)) {
+          return -1;
+        }
         if (offsetReg.file != QPUreg::A) {
             cerr << "branch target offset register must be file A" << endl;
             return -1;
@@ -631,8 +673,8 @@ uint64_t assembleSEMA(context& ctx, string word)
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
     if (tok != COMMA)   return -1;
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
-    uint32_t imm = parseImmediate(token_str);
-    if (imm > 15) {
+    uint32_t imm = parseSmallImmediate(token_str);
+    if (imm < 0) {
         cerr << "semaphore out of range" << endl;
         return -1;
     }
