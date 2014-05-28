@@ -95,6 +95,12 @@ string printRegister(const QPUreg& reg)
     return buffer;
 }
 
+void parsePossibleNumber(const char* possibleNumber, int base, uint32_t* outNumber, bool* outIsNumber) {
+    char *endOfNumber;
+    *outNumber = strtol(possibleNumber, &endOfNumber, base);
+    *outIsNumber = (!(endOfNumber == possibleNumber || *endOfNumber != '\0' || errno == ERANGE));
+}
+
 bool parseRegister(const string& word, QPUreg& reg)
 {
     if (word[0] != 'r')
@@ -110,16 +116,14 @@ bool parseRegister(const string& word, QPUreg& reg)
     }
 
     const char* possibleNumber = (word.c_str() + offset);
-
-    char *endOfNumber;
-    reg.num = strtol(possibleNumber, &endOfNumber, 10);
-    if (endOfNumber == possibleNumber || *endOfNumber != '\0' || errno == ERANGE) {
+    bool isNumber;
+    uint32_t number;
+    parsePossibleNumber(possibleNumber, 10, &number, &isNumber);
+    if (!isNumber) {
       cerr << "Warning - couldn't interpret '" << word << "' as a register" << endl;
       return false;
     }
-
-    // TODO: check that this is in range.  (ACCUM < 6, e.g.)
-    reg.num = atoi(word.c_str() + offset);
+    reg.num = number;
 
     if ((reg.file == QPUreg::ACCUM) && (reg.num >= 6)) {
       fprintf(stderr, "Warning - accumulator out of range\n");
@@ -129,19 +133,20 @@ bool parseRegister(const string& word, QPUreg& reg)
     return true;
 }
 
-uint32_t parseFullImmediate(const string& str)
+bool parseFullImmediate(const string& str, uint32_t* outResult)
 {
-    uint32_t result;
+    bool isNumber;
     // if there is an 'x' we assume it's hex.
     if (str.find_first_of("x") != string::npos) {
-        result = strtoul(str.c_str(), NULL, 16);
+        parsePossibleNumber(str.c_str(), 16, outResult, &isNumber);
     } else if (str.find_first_of(".f") != string::npos) {
         float f = strtof(str.c_str(), NULL);
-        result = *(uint32_t*)&f;
+        *outResult = *(uint32_t*)&f;
+        isNumber = true;
     } else {
-        result = strtoul(str.c_str(), NULL, 10);
+        parsePossibleNumber(str.c_str(), 10, outResult, &isNumber);
     }
-    return result;
+    return isNumber;
 }
 
 int32_t parseSmallImmediate(const string& str)
@@ -198,6 +203,67 @@ uint8_t parseBranchCond(const string& str)
     // throw some exceptions
     cerr << "Invalid branch condition: " << str << endl;
     exit(0);
+}
+
+bool parsePacking(const string& str, uint32_t* outUnpack, uint32_t* outPM, uint32_t* outPack)
+{
+    *outUnpack = 0;
+    *outPM = 0;
+    *outPack = 0;
+    if (str == "unpack32") {
+        *outUnpack = 0;
+    } else if (str == "unpack16a") {
+        *outUnpack = 1;
+    } else if (str == "unpack16b") {
+        *outUnpack = 2;
+    } else if (str == "unpack8ddupe") {
+        *outUnpack = 3;
+    } else if (str == "unpack8a") {
+        *outUnpack = 4;
+    } else if (str == "unpack8b") {
+        *outUnpack = 5;
+    } else if (str == "unpack8c") {
+        *outUnpack = 6;
+    } else if (str == "unpack8d") {
+        *outUnpack = 7;
+    } else if (str == "pack32") {
+        *outPack = 0;
+    } else if (str == "pack16a") {
+        *outPack = 1;
+    } else if (str == "pack16b") {
+        *outPack = 2;
+    } else if (str == "pack8ddupe") {
+        *outPack = 3;
+    } else if (str == "pack8a") {
+        *outPack = 4;
+    } else if (str == "pack8b") {
+        *outPack = 5;
+    } else if (str == "pack8c") {
+        *outPack = 6;
+    } else if (str == "pack8d") {
+        *outPack = 7;
+    } else if (str == "pack32clamp") {
+        *outPack = 8;
+    } else if (str == "pack16aclamp") {
+        *outPack = 9;
+    } else if (str == "pack16bclamp") {
+        *outPack = 10;
+    } else if (str == "pack8ddupeclamp") {
+        *outPack = 11;
+    } else if (str == "pack8aclamp") {
+        *outPack = 12;
+    } else if (str == "pack8bclamp") {
+        *outPack = 13;
+    } else if (str == "pack8cclamp") {
+        *outPack = 14;
+    } else if (str == "pack8dclamp") {
+        *outPack = 15;
+    } else {
+      cerr << "Unknown pack condition: " << str << endl;
+      return false;
+    }
+
+    return true;
 }
 
 uint8_t setALUMux(const QPUreg& reg)
@@ -328,6 +394,20 @@ uint64_t assembleALU(context& ctx, string word)
     if (add_op == 0xFF) {
         cout << "FATAL (assert).  Bad ADD opcode: " << word << endl;
         return -1;
+    }
+
+    uint32_t unpack = 0;
+    uint32_t pm = 0;
+    uint32_t pack = 0;
+    const char *discard = NULL;
+    string nextTokenStr;
+    if (nextToken(ctx.stream, nextTokenStr, &discard) == DOT) {
+        // Packing or unpacking
+        nextToken(ctx.stream, token_str, &ctx.stream);
+        nextToken(ctx.stream, token_str, &ctx.stream);
+        if (!parsePacking(token_str, &unpack, &pm, &pack)) {
+          cout << "FATAL.  Bad packing modifier: " << token_str << endl;
+        }
     }
 
     QPUreg addDest, addR1, addR2;
@@ -481,7 +561,14 @@ uint64_t assembleALU(context& ctx, string word)
       printRegister(mulR2).c_str()
     );
 
-    ins = ((uint64_t)sig << 60) | ((uint64_t)cond_add << 49) | ((uint64_t)cond_mul << 46) | ((uint64_t)sf << 45) | ((uint64_t)ws << 44);
+    ins = ((uint64_t)sig << 60) |
+      ((uint64_t)unpack << 57) |
+      ((uint64_t)pm << 56) |
+      ((uint64_t)pack << 52) |
+      ((uint64_t)cond_add << 49) |
+      ((uint64_t)cond_mul << 46) |
+      ((uint64_t)sf << 45) |
+      ((uint64_t)ws << 44);
     ins |= ((uint64_t)addDest.num << 38) | ((uint64_t)mulDest.num << 32) | ((uint64_t)mul_op << 29) | ((uint64_t)add_op << 24);
     ins |= ((uint64_t)read_a << 18) | ((uint64_t)read_b << 12) | ((uint64_t)add_a << 9) | ((uint64_t)add_b << 6) | ((uint64_t)mul_a << 3) | mul_b;
 
@@ -523,14 +610,18 @@ uint64_t assembleLDI(context& ctx, string word)
     register2.file = (register1.file == QPUreg::A) ? QPUreg::B : QPUreg::A;
     if (isRegisterWord(token_str)) {
         if (!parseRegister(token_str, register2)) {
-          return false;
+          return -1;
         }
         tok = nextToken(ctx.stream, token_str, &ctx.stream);
         // check that this is a comma ...
     }
 
     tok = nextToken(ctx.stream, token_str, &ctx.stream);
-    unsigned int immediate = parseFullImmediate(token_str);
+    unsigned int immediate;
+    if (!parseFullImmediate(token_str, &immediate)) {
+      cerr << "Immediate couldn't be parsed: " << token_str << endl;
+      return -1;
+    }
 
     cout << "r1: " << printRegister(register1) << ", r2: "
                    << printRegister(register2) << ", immed: 0x"
