@@ -332,7 +332,7 @@ token_t nextToken(const char *stream, string& out, const char **ptr)
 }
 
 
-bool aluHelper(const char *stream, QPUreg& dest, QPUreg& r1, QPUreg& r2, uint8_t& sig, const char **ptr)
+bool aluHelper(const char *stream, QPUreg& dest, QPUreg& r1, QPUreg& r2, uint8_t& sig, uint32_t& unpack, uint32_t& pm, uint32_t& pack, const char **ptr)
 {
     string token_str;
     token_t tok = nextToken(stream, token_str, &stream);
@@ -341,10 +341,16 @@ bool aluHelper(const char *stream, QPUreg& dest, QPUreg& r1, QPUreg& r2, uint8_t
         // conditional
         nextToken(stream, token_str, &stream);
         cout << "flag/conditional = " << token_str << endl;
-        if (token_str == "tmu")
+        if (token_str == "tmu") {
             sig = 10;
-        else if (token_str == "tend")
+        } else if (token_str == "tend") {
             sig = 3;
+        } else if (parsePacking(token_str, &unpack, &pm, &pack)) {
+          // Do nothing, the parse function has filled in the values
+        } else {
+          cout << "Conditional couldn't be understood: " << token_str << endl;
+          return false;
+        }
         tok = nextToken(stream, token_str, &stream);
     }
 
@@ -399,22 +405,12 @@ uint64_t assembleALU(context& ctx, string word)
     uint32_t unpack = 0;
     uint32_t pm = 0;
     uint32_t pack = 0;
-    const char *discard = NULL;
-    string nextTokenStr;
-    if (nextToken(ctx.stream, nextTokenStr, &discard) == DOT) {
-        // Packing or unpacking
-        nextToken(ctx.stream, token_str, &ctx.stream);
-        nextToken(ctx.stream, token_str, &ctx.stream);
-        if (!parsePacking(token_str, &unpack, &pm, &pack)) {
-          cout << "FATAL.  Bad packing modifier: " << token_str << endl;
-        }
-    }
 
     QPUreg addDest, addR1, addR2;
     QPUreg mulDest, mulR1, mulR2;
 
     uint8_t sig = 0x1;          // no-signal (TODO: plumb signals through)
-    if (!aluHelper(ctx.stream, addDest, addR1, addR2, sig, &ctx.stream))
+    if (!aluHelper(ctx.stream, addDest, addR1, addR2, sig, unpack, pm, pack, &ctx.stream))
         return -1;
 
     token_t tok = nextToken(ctx.stream, token_str, &ctx.stream);
@@ -443,7 +439,8 @@ uint64_t assembleALU(context& ctx, string word)
 
     if (!skipParseMul) {
         uint8_t junk;
-        if (!aluHelper(ctx.stream, mulDest, mulR1, mulR2, junk, &ctx.stream))
+        uint32_t junk32;
+        if (!aluHelper(ctx.stream, mulDest, mulR1, mulR2, junk, junk32, junk32, junk32, &ctx.stream))
             return -1;
     }
 
@@ -786,23 +783,20 @@ int main(int argc, char **argv)
     char *outfname = 0;
     int c;
 
-    while ((c = getopt(argc, argv, "o:")) != -1) {
+    char* writeCPP = NULL;
+    while ((c = getopt(argc, argv, "o:c:")) != -1) {
         switch (c) {
             case 'o':
                 outfname = optarg;
+                break;
+            case 'c':
+                writeCPP = optarg;
                 break;
         }
     }
 
     if (!outfname) {
         cerr << "Usage: " << argv[0] << " -o <output>" << endl;
-        return -1;
-    }
-
-    FILE *outfile = fopen(outfname, "w");
-    if (!outfile)
-    {
-        cerr << "Unable to open output file output.bin" << endl;
         return -1;
     }
 
@@ -885,8 +879,27 @@ int main(int argc, char **argv)
         instructions[r.pc / 8] = ins;
     }
 
-    for (int i=0; i < instructions.size(); i++)
-        fwrite(&instructions[i], sizeof(uint64_t), 1, outfile);
+    FILE *outfile = fopen(outfname, "w");
+    if (!outfile)
+    {
+        cerr << "Unable to open output file output.bin" << endl;
+        return -1;
+    }
+
+    if (writeCPP) {
+      fprintf(outfile, "#include <stdint.h>\n");
+      fprintf(outfile, "#include <stddef.h>\n\n");
+      fprintf(outfile, "uint32_t %s[%d] = {\n", writeCPP, (instructions.size() * 2));
+      uint32_t* instructionsData = (uint32_t*)(&instructions[0]);
+      for (int i=0; i < instructions.size(); i++) {
+        fprintf(outfile, "  0x%08x, 0x%08x,\n", instructionsData[(i * 2) + 0], instructionsData[(i * 2) + 1]);
+      }
+      fprintf(outfile, "};\n\n");
+      fprintf(outfile, "size_t %sByteCount = %d;\n", writeCPP, (instructions.size() * 8));
+    } else {
+      for (int i=0; i < instructions.size(); i++)
+          fwrite(&instructions[i], sizeof(uint64_t), 1, outfile);
+    }
 
     fclose(outfile);
     cout << "Done.  Num instructions: " << instructions.size() << ", "
