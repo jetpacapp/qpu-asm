@@ -6,6 +6,8 @@
 #include <vector>
 #include <assert.h>
 #include <errno.h>
+#include <sstream>
+#include <algorithm>
 
 using namespace std;
 
@@ -95,7 +97,7 @@ string printRegister(const QPUreg& reg)
     return buffer;
 }
 
-void parsePossibleNumber(const char* possibleNumber, int base, uint32_t* outNumber, bool* outIsNumber) {
+void parsePossibleNumber(const char* possibleNumber, int base, int* outNumber, bool* outIsNumber) {
     char *endOfNumber;
     *outNumber = strtol(possibleNumber, &endOfNumber, base);
     *outIsNumber = (!(endOfNumber == possibleNumber || *endOfNumber != '\0' || errno == ERANGE));
@@ -117,7 +119,7 @@ bool parseRegister(const string& word, QPUreg& reg)
 
     const char* possibleNumber = (word.c_str() + offset);
     bool isNumber;
-    uint32_t number;
+    int number;
     parsePossibleNumber(possibleNumber, 10, &number, &isNumber);
     if (!isNumber) {
       cerr << "Warning - couldn't interpret '" << word << "' as a register" << endl;
@@ -133,18 +135,91 @@ bool parseRegister(const string& word, QPUreg& reg)
     return true;
 }
 
-bool parseFullImmediate(const string& str, uint32_t* outResult)
+bool parseFullImmediate(const string& str, uint32_t* outResult, uint32_t* outType)
 {
     bool isNumber;
-    // if there is an 'x' we assume it's hex.
-    if (str.find_first_of("x") != string::npos) {
-        parsePossibleNumber(str.c_str(), 16, outResult, &isNumber);
-    } else if (str.find_first_of(".f") != string::npos) {
-        float f = strtof(str.c_str(), NULL);
-        *outResult = *(uint32_t*)&f;
-        isNumber = true;
+    if (str[0] == '[') {
+      bool areAnyNegative = false;
+      std:string cleanedString(str);
+      cleanedString.erase(std::remove(cleanedString.begin(), cleanedString.end(), '['), cleanedString.end());
+      cleanedString.erase(std::remove(cleanedString.begin(), cleanedString.end(), ']'), cleanedString.end());
+      std::stringstream ss(cleanedString);
+      std::string item;
+      int itemCount = 0;
+      int itemValues[16];
+      while (std::getline(ss, item, ',')) {
+        if (itemCount >= 16) {
+          break;
+        }
+        bool isItemNumber;
+        int itemValue;
+        parsePossibleNumber(item.c_str(), 10, &itemValues[itemCount], &isItemNumber);
+        if (!isItemNumber) {
+          cerr << "Couldn't understand '" << item << "' as an entry in an immediate list" << endl;
+          return false;
+        }
+        if (itemValues[itemCount] < 0) {
+          areAnyNegative = true;
+        }
+        itemCount += 1;
+      }
+
+      if (itemCount < 16) {
+          cerr << "Found too few items in the immediate array - expected 16 but had " << itemCount << endl;
+          return false;
+      }
+
+      if (areAnyNegative) {
+        *outType = 0x02;
+      } else {
+        *outType = 0x06;
+      }
+
+      uint32_t result = 0;
+      for (int index = 0; index < 16; index += 1) {
+        int value = itemValues[index];
+        if (areAnyNegative) {
+          if ((value < -1) || (value > 1)) {
+            cerr << "Found an out-of-range signed value in the immediate array - expected -1, 0, or 1 but found " << value << endl;
+            return false;
+          }
+        } else {
+          if (value > 3) {
+            cerr << "Found an out-of-range unsigned value in the immediate array - expected 0, 1, 2, or 3 but found " << value << endl;
+            return false;
+          }
+        }
+        uint32_t msb;
+        uint32_t lsb;
+        if (areAnyNegative) {
+          msb = ((value & 0x80000000) >> 31);
+          lsb = (value & 0x1);
+        } else {
+          msb = ((value & 0x2) >> 1);
+          lsb = (value & 0x1);
+        }
+        result = (result | (lsb << (index + 0)));
+        result = (result | (msb << (index + 16)));
+      }
+
+      *outResult = result;
+      isNumber = true;
     } else {
-        parsePossibleNumber(str.c_str(), 10, outResult, &isNumber);
+      *outType = 0x00; // A full 32-bit immediate
+      // if there is an 'x' we assume it's hex.
+      if (str.find_first_of("x") != string::npos) {
+          int signedResult;
+          parsePossibleNumber(str.c_str(), 16, &signedResult, &isNumber);
+          *outResult = signedResult;
+      } else if (str.find_first_of(".f") != string::npos) {
+          float f = strtof(str.c_str(), NULL);
+          *outResult = *(uint32_t*)&f;
+          isNumber = true;
+      } else {
+          int signedResult;
+          parsePossibleNumber(str.c_str(), 10, &signedResult, &isNumber);
+          *outResult = signedResult;
+      }
     }
     return isNumber;
 }
@@ -613,19 +688,18 @@ uint64_t assembleLDI(context& ctx, string word)
         // check that this is a comma ...
     }
 
-    tok = nextToken(ctx.stream, token_str, &ctx.stream);
+    uint32_t immediateType = 0x00; // A full 32-bit immediate
     unsigned int immediate;
-    if (!parseFullImmediate(token_str, &immediate)) {
-      cerr << "Immediate couldn't be parsed: " << token_str << endl;
+    string restOfLine(ctx.stream);
+    restOfLine = (token_str + restOfLine);
+    if (!parseFullImmediate(restOfLine, &immediate, &immediateType)) {
+      cerr << "Immediate couldn't be parsed: " << restOfLine << endl;
       return -1;
     }
 
     cout << "r1: " << printRegister(register1) << ", r2: "
                    << printRegister(register2) << ", immed: 0x"
                    << hex << immediate << dec << endl;
-
-    while (nextToken(ctx.stream, token_str, &ctx.stream) != END)
-        ;
 
     // The accumulators are mapped to r32-35 in this context
     if (register1.file == QPUreg::ACCUM) {
@@ -635,7 +709,8 @@ uint64_t assembleLDI(context& ctx, string word)
       register2.num += 32;
     }
 
-    uint32_t high = (uint32_t)0xE00 << 20;
+    uint32_t high = (uint32_t)0xE << 28;
+    high |= immediateType << 24;
     high |= (uint32_t)0x1 << 17;      // cond_add
     high |= (uint32_t)0x1 << 14;      // cond_mul
     high |= (uint32_t)0x0 << 13;      // sf
@@ -882,7 +957,7 @@ int main(int argc, char **argv)
     FILE *outfile = fopen(outfname, "w");
     if (!outfile)
     {
-        cerr << "Unable to open output file output.bin" << endl;
+        cerr << "Unable to open output file " << string(outfname) << endl;
         return -1;
     }
 
