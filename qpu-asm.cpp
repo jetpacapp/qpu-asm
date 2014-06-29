@@ -416,8 +416,10 @@ bool aluHelper(const char *stream, QPUreg& dest, QPUreg& r1, QPUreg& r2, uint8_t
         // conditional
         nextToken(stream, token_str, &stream);
         cout << "flag/conditional = " << token_str << endl;
-        if (token_str == "tmu") {
+        if (token_str == "ldtmu0") {
             sig = 10;
+        } else if (token_str == "ldtmu1") {
+            sig = 11;
         } else if (token_str == "tend") {
             sig = 3;
         } else if (parsePacking(token_str, &unpack, &pm, &pack)) {
