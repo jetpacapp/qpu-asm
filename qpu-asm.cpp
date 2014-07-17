@@ -236,6 +236,14 @@ int32_t parseSmallImmediate(const string& str)
     } else if (str.find_first_of("<<") != string::npos) {
         uint32_t shift = strtoul(str.c_str() + 2, NULL, 10);
         result = (48 + shift);
+    } else if (str.find_first_of("-") != string::npos) {
+        uint32_t value = strtoul(str.c_str() + 1, NULL, 10);
+        if ((value < 1) || (value > 16)) {
+          cerr << "Negative immediate out of range: " << str << endl;
+          result = -1;
+        } else {
+          result = (32 + value);
+        }
     } else {
         result = strtoul(str.c_str(), NULL, 10);
         if (result >= 16) {
