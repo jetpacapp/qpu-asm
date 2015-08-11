@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <sstream>
 #include <algorithm>
+#include <unistd.h> // for getopt()
 
 using namespace std;
 
